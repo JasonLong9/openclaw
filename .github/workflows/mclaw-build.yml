@@ -1,11 +1,12 @@
-name: OpenClaw-Standardized-Mac-Runtime-Intake
+name: OpenClaw-Standardized-Intel-Mac-Runtime-Intake
 
 on:
   workflow_dispatch: 
 
 jobs:
-  build_verify_package:
-    runs-on: macos-14 
+  build_verify_intel_package:
+    # 核心关键：macos-13 是 Intel 芯片架构，uname -m 会输出 x86_64
+    runs-on: macos-13 
 
     steps:
       - name: 1. Checkout Code
@@ -24,9 +25,10 @@ jobs:
           npm install --force
           npm run build || echo "Skip build"
 
-      - name: 4. Export & Standardize (核心重组)
+      - name: 4. Export & Standardize (按文档标准重组)
         run: |
-          TARGET="darwin-arm64"
+          # 严格对齐你的文档要求：根目录必须是 darwin-x64
+          TARGET="darwin-x64"
           mkdir -p "$TARGET/bin"
           mkdir -p "$TARGET/node_modules/openclaw"
 
@@ -42,15 +44,15 @@ jobs:
           cp -R node_modules "$TARGET/"
           cp package.json "$TARGET/node_modules/openclaw/"
 
-          # 获取两次版本的输出 (带容错，防止二进制在 CI 环境下拒绝输出)
+          # 获取两次版本的输出 (满足文档对 --version 的强制要求)
           SRC_VER_OUT=$(node "$BIN_PATH" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
           CP_VER_OUT=$(node "$TARGET/bin/openclaw" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
           
           echo "SRC_VER_OUT=$SRC_VER_OUT" >> $GITHUB_ENV
           echo "CP_VER_OUT=$CP_VER_OUT" >> $GITHUB_ENV
 
-          # 严格按 7 字段规范生成 notes.txt
-          NOTES="$TARGET/darwin-arm64-runtime-notes.txt"
+          # 严格按文档的 7 字段规范生成 notes.txt
+          NOTES="$TARGET/darwin-x64-runtime-notes.txt"
           echo "machine_arch=$(uname -m)" > "$NOTES"
           echo "source_openclaw_bin=$BIN_PATH" >> "$NOTES"
           echo "resolved_openclaw_bin=$TARGET/bin/openclaw" >> "$NOTES"
@@ -61,40 +63,46 @@ jobs:
 
       - name: 5. Strict Pre-packaging Self-Check (打包前自检与熔断)
         run: |
-          TARGET="darwin-arm64"
-          echo "Running Strict Verification..."
+          TARGET="darwin-x64"
+          echo "Running Strict Verification for Intel Mac..."
 
-          # 校验 1: package.json 必须存在
+          # 校验 1: 必须是 x86_64 架构
+          ARCH=$(uname -m)
+          if [ "$ARCH" != "x86_64" ]; then
+            echo "❌ Validation Failed: Architecture is $ARCH, expected x86_64."
+            exit 1
+          fi
+
+          # 校验 2: package.json 必须存在
           if [ ! -f "$TARGET/node_modules/openclaw/package.json" ]; then
             echo "❌ Validation Failed: $TARGET/node_modules/openclaw/package.json is missing."
             exit 1
           fi
 
-          # 校验 2: 实体入口必须存在
+          # 校验 3: 实体入口必须存在
           if [ ! -f "$TARGET/bin/openclaw" ]; then
             echo "❌ Validation Failed: $TARGET/bin/openclaw is missing."
             exit 1
           fi
 
-          # 校验 3: 版本一致性比对
+          # 校验 4: 版本一致性比对
           if [ "${{ env.SRC_VER_OUT }}" != "${{ env.CP_VER_OUT }}" ]; then
             echo "❌ Validation Failed: Source version (${{ env.SRC_VER_OUT }}) does not match copied version (${{ env.CP_VER_OUT }})."
             exit 1
           fi
 
-          echo "✅ All structural and version integrity checks passed."
+          echo "✅ All structural, architecture, and version integrity checks passed."
 
-      - name: 6. Package and CI Summary (打包与发布摘要)
+      - name: 6. Package and CI Summary (打包)
         run: |
-          # 动态生成包含真实版本号的 tar 包名
-          TAR_NAME="darwin-arm64-openclaw-${{ env.REAL_VERSION }}.tar.gz"
-          tar -czvf "$TAR_NAME" darwin-arm64/
+          # 满足文档建议的命名标准: darwin-x64-openclaw-<version>.tar.gz
+          TAR_NAME="darwin-x64-openclaw-${{ env.REAL_VERSION }}.tar.gz"
+          tar -czvf "$TAR_NAME" darwin-x64/
           echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
 
-          # 将核心信息打印到 GitHub Actions Summary 面板
-          echo "### Mac Runtime Candidate Export Successful 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "### Intel Mac (x64) Runtime Candidate Export Successful 🚀" >> $GITHUB_STEP_SUMMARY
           echo "- **Platform:** darwin" >> $GITHUB_STEP_SUMMARY
-          echo "- **Arch:** $(uname -m)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Arch:** $(uname -m) (Verified Intel)" >> $GITHUB_STEP_SUMMARY
           echo "- **Real Version:** \`${{ env.REAL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Binary Output:** \`${{ env.CP_VER_OUT }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact Name:** \`$TAR_NAME\`" >> $GITHUB_STEP_SUMMARY
@@ -102,5 +110,5 @@ jobs:
       - name: 7. Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: darwin-arm64-openclaw-${{ env.REAL_VERSION }}
+          name: darwin-x64-openclaw-${{ env.REAL_VERSION }}
           path: ${{ env.TAR_NAME }}
