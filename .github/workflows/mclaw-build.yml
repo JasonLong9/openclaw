@@ -1,64 +1,106 @@
-name: Mclaw-Build-Mac-ARM64-Final
+name: OpenClaw-Standardized-Mac-Runtime-Intake
 
 on:
   workflow_dispatch: 
 
 jobs:
-  build_mac:
+  build_verify_package:
     runs-on: macos-14 
 
     steps:
-      - name: 1. 拉取 v2026.3.24 代码
+      - name: 1. Checkout Code
         uses: actions/checkout@v4
         with:
-          ref: 'v2026.3.24' 
+          ref: 'v2026.3.24'
 
-      - name: 2. 准备 Node 环境 (升级到 24 适配 2026 环境)
+      - name: 2. Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      - name: 3. 安装依赖 (忽略 PeerDeps 报错)
+      - name: 3. Install & Build
         run: |
           npm config set registry https://registry.npmmirror.com
-          # 使用 --force 强行安装，防止因为旧版本依赖冲突卡死
-          npm install --force || echo "安装过程有警告，继续执行"
+          npm install --force
+          npm run build || echo "Skip build"
 
-      - name: 4. 执行编译
+      - name: 4. Export & Standardize (核心重组)
         run: |
-          npm run build || echo "没有 build 脚本或编译失败，跳过"
+          TARGET="darwin-arm64"
+          mkdir -p "$TARGET/bin"
+          mkdir -p "$TARGET/node_modules/openclaw"
 
-      - name: 5. 调试：查看当前目录到底有什么 (防空跑)
-        run: |
-          ls -R
-
-      - name: 6. 组装标准 darwin-arm64 结构
-        run: |
-          mkdir -p darwin-arm64/bin
+          # 动态提取真实版本号与真正的 Bin 路径
+          REAL_VERSION=$(node -p "require('./package.json').version")
+          BIN_PATH=$(node -p "require('path').resolve(require('./package.json').bin.openclaw || require('./package.json').bin || 'bin/openclaw')")
           
-          # 寻找二进制入口：先找根目录，再找 packages 内部
-          find . -name "openclaw" -type f -exec cp {} darwin-arm64/bin/ \; || touch darwin-arm64/bin/openclaw
-          
-          # 复制 node_modules (如果太大可以只复制关键部分，但这里全复制以保万全)
-          cp -R node_modules darwin-arm64/ 2>/dev/null || mkdir -p darwin-arm64/node_modules
-          
-          # 补齐 node_modules/openclaw/package.json
-          mkdir -p darwin-arm64/node_modules/openclaw
-          cp package.json darwin-arm64/node_modules/openclaw/
+          echo "REAL_VERSION=$REAL_VERSION" >> $GITHUB_ENV
 
-          # 生成 notes.txt
-          echo "Mclaw Build Notes" > darwin-arm64/darwin-arm64-runtime-notes.txt
-          echo "------------------" >> darwin-arm64/darwin-arm64-runtime-notes.txt
-          echo "Build Date: $(date)" >> darwin-arm64/darwin-arm64-runtime-notes.txt
-          echo "Architecture: $(uname -m)" >> darwin-arm64/darwin-arm64-runtime-notes.txt
-          echo "Source Tag: v2026.3.24" >> darwin-arm64/darwin-arm64-runtime-notes.txt
+          # 物理复制可执行入口与依赖
+          cp "$BIN_PATH" "$TARGET/bin/openclaw"
+          chmod +x "$TARGET/bin/openclaw"
+          cp -R node_modules "$TARGET/"
+          cp package.json "$TARGET/node_modules/openclaw/"
 
-      - name: 7. 最终打包
+          # 获取两次版本的输出 (带容错，防止二进制在 CI 环境下拒绝输出)
+          SRC_VER_OUT=$(node "$BIN_PATH" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
+          CP_VER_OUT=$(node "$TARGET/bin/openclaw" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
+          
+          echo "SRC_VER_OUT=$SRC_VER_OUT" >> $GITHUB_ENV
+          echo "CP_VER_OUT=$CP_VER_OUT" >> $GITHUB_ENV
+
+          # 严格按 7 字段规范生成 notes.txt
+          NOTES="$TARGET/darwin-arm64-runtime-notes.txt"
+          echo "machine_arch=$(uname -m)" > "$NOTES"
+          echo "source_openclaw_bin=$BIN_PATH" >> "$NOTES"
+          echo "resolved_openclaw_bin=$TARGET/bin/openclaw" >> "$NOTES"
+          echo "runtime_prefix_dir=$TARGET" >> "$NOTES"
+          echo "source_version_output=$SRC_VER_OUT" >> "$NOTES"
+          echo "copied_version_output=$CP_VER_OUT" >> "$NOTES"
+          echo "generated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$NOTES"
+
+      - name: 5. Strict Pre-packaging Self-Check (打包前自检与熔断)
         run: |
-          tar -czvf openclaw-darwin-arm64.tar.gz darwin-arm64/
+          TARGET="darwin-arm64"
+          echo "Running Strict Verification..."
 
-      - name: 8. 上传 Artifact
+          # 校验 1: package.json 必须存在
+          if [ ! -f "$TARGET/node_modules/openclaw/package.json" ]; then
+            echo "❌ Validation Failed: $TARGET/node_modules/openclaw/package.json is missing."
+            exit 1
+          fi
+
+          # 校验 2: 实体入口必须存在
+          if [ ! -f "$TARGET/bin/openclaw" ]; then
+            echo "❌ Validation Failed: $TARGET/bin/openclaw is missing."
+            exit 1
+          fi
+
+          # 校验 3: 版本一致性比对
+          if [ "${{ env.SRC_VER_OUT }}" != "${{ env.CP_VER_OUT }}" ]; then
+            echo "❌ Validation Failed: Source version (${{ env.SRC_VER_OUT }}) does not match copied version (${{ env.CP_VER_OUT }})."
+            exit 1
+          fi
+
+          echo "✅ All structural and version integrity checks passed."
+
+      - name: 6. Package and CI Summary (打包与发布摘要)
+        run: |
+          # 动态生成包含真实版本号的 tar 包名
+          TAR_NAME="darwin-arm64-openclaw-${{ env.REAL_VERSION }}.tar.gz"
+          tar -czvf "$TAR_NAME" darwin-arm64/
+          echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
+
+          # 将核心信息打印到 GitHub Actions Summary 面板
+          echo "### Mac Runtime Candidate Export Successful 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform:** darwin" >> $GITHUB_STEP_SUMMARY
+          echo "- **Arch:** $(uname -m)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Real Version:** \`${{ env.REAL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Binary Output:** \`${{ env.CP_VER_OUT }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact Name:** \`$TAR_NAME\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: 7. Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: darwin-arm64-official-runtime
-          path: openclaw-darwin-arm64.tar.gz
+          name: darwin-arm64-openclaw-${{ env.REAL_VERSION }}
+          path: ${{ env.TAR_NAME }}
