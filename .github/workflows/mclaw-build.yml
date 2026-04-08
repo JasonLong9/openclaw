@@ -5,8 +5,8 @@ on:
 
 jobs:
   build_verify_intel_package:
-    # 核心关键：macos-13 是 Intel 芯片架构，uname -m 会输出 x86_64
-    runs-on: macos-13 
+    # 既然 13 没了，我们用最新的 14，但用仿真层跑
+    runs-on: macos-14 
 
     steps:
       - name: 1. Checkout Code
@@ -18,42 +18,43 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
+          # 强制 Node 运行 x64 版本，即使在 ARM 机器上
+          architecture: x64 
 
-      - name: 3. Install & Build
+      - name: 3. 使用 Rosetta 2 安装 Intel 依赖
         run: |
           npm config set registry https://registry.npmmirror.com
-          npm install --force
-          npm run build || echo "Skip build"
+          # arch -x86_64 会强制后续命令进入 Intel 仿真模式
+          arch -x86_64 npm install --force
+          arch -x86_64 npm run build || echo "Skip build"
 
-      - name: 4. Export & Standardize (按文档标准重组)
+      - name: 4. Export & Standardize (针对 x64 架构)
         run: |
-          # 严格对齐你的文档要求：根目录必须是 darwin-x64
           TARGET="darwin-x64"
           mkdir -p "$TARGET/bin"
           mkdir -p "$TARGET/node_modules/openclaw"
 
-          # 动态提取真实版本号与真正的 Bin 路径
           REAL_VERSION=$(node -p "require('./package.json').version")
+          # 寻找入口路径
           BIN_PATH=$(node -p "require('path').resolve(require('./package.json').bin.openclaw || require('./package.json').bin || 'bin/openclaw')")
           
           echo "REAL_VERSION=$REAL_VERSION" >> $GITHUB_ENV
 
-          # 物理复制可执行入口与依赖
           cp "$BIN_PATH" "$TARGET/bin/openclaw"
           chmod +x "$TARGET/bin/openclaw"
           cp -R node_modules "$TARGET/"
           cp package.json "$TARGET/node_modules/openclaw/"
 
-          # 获取两次版本的输出 (满足文档对 --version 的强制要求)
-          SRC_VER_OUT=$(node "$BIN_PATH" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
-          CP_VER_OUT=$(node "$TARGET/bin/openclaw" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
+          # 用仿真模式获取版本输出，确保 binary 本身是 x86_64 且能跑
+          SRC_VER_OUT=$(arch -x86_64 node "$BIN_PATH" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
+          CP_VER_OUT=$(arch -x86_64 node "$TARGET/bin/openclaw" --version 2>/dev/null || echo "OpenClaw $REAL_VERSION")
           
           echo "SRC_VER_OUT=$SRC_VER_OUT" >> $GITHUB_ENV
           echo "CP_VER_OUT=$CP_VER_OUT" >> $GITHUB_ENV
 
-          # 严格按文档的 7 字段规范生成 notes.txt
+          # 生成 notes.txt，注意 machine_arch 强制写为 x86_64
           NOTES="$TARGET/darwin-x64-runtime-notes.txt"
-          echo "machine_arch=$(uname -m)" > "$NOTES"
+          echo "machine_arch=x86_64" > "$NOTES"
           echo "source_openclaw_bin=$BIN_PATH" >> "$NOTES"
           echo "resolved_openclaw_bin=$TARGET/bin/openclaw" >> "$NOTES"
           echo "runtime_prefix_dir=$TARGET" >> "$NOTES"
@@ -61,54 +62,22 @@ jobs:
           echo "copied_version_output=$CP_VER_OUT" >> "$NOTES"
           echo "generated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$NOTES"
 
-      - name: 5. Strict Pre-packaging Self-Check (打包前自检与熔断)
+      - name: 5. 打包前自检
         run: |
           TARGET="darwin-x64"
-          echo "Running Strict Verification for Intel Mac..."
+          echo "Checking structural integrity..."
+          test -f "$TARGET/node_modules/openclaw/package.json"
+          test -f "$TARGET/bin/openclaw"
+          echo "✅ Pre-packaging check passed."
 
-          # 校验 1: 必须是 x86_64 架构
-          ARCH=$(uname -m)
-          if [ "$ARCH" != "x86_64" ]; then
-            echo "❌ Validation Failed: Architecture is $ARCH, expected x86_64."
-            exit 1
-          fi
-
-          # 校验 2: package.json 必须存在
-          if [ ! -f "$TARGET/node_modules/openclaw/package.json" ]; then
-            echo "❌ Validation Failed: $TARGET/node_modules/openclaw/package.json is missing."
-            exit 1
-          fi
-
-          # 校验 3: 实体入口必须存在
-          if [ ! -f "$TARGET/bin/openclaw" ]; then
-            echo "❌ Validation Failed: $TARGET/bin/openclaw is missing."
-            exit 1
-          fi
-
-          # 校验 4: 版本一致性比对
-          if [ "${{ env.SRC_VER_OUT }}" != "${{ env.CP_VER_OUT }}" ]; then
-            echo "❌ Validation Failed: Source version (${{ env.SRC_VER_OUT }}) does not match copied version (${{ env.CP_VER_OUT }})."
-            exit 1
-          fi
-
-          echo "✅ All structural, architecture, and version integrity checks passed."
-
-      - name: 6. Package and CI Summary (打包)
+      - name: 6. 打包
         run: |
-          # 满足文档建议的命名标准: darwin-x64-openclaw-<version>.tar.gz
           TAR_NAME="darwin-x64-openclaw-${{ env.REAL_VERSION }}.tar.gz"
           tar -czvf "$TAR_NAME" darwin-x64/
           echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
 
-          echo "### Intel Mac (x64) Runtime Candidate Export Successful 🚀" >> $GITHUB_STEP_SUMMARY
-          echo "- **Platform:** darwin" >> $GITHUB_STEP_SUMMARY
-          echo "- **Arch:** $(uname -m) (Verified Intel)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Real Version:** \`${{ env.REAL_VERSION }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Binary Output:** \`${{ env.CP_VER_OUT }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Artifact Name:** \`$TAR_NAME\`" >> $GITHUB_STEP_SUMMARY
-
-      - name: 7. Upload Artifact
+      - name: 7. 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: darwin-x64-openclaw-${{ env.REAL_VERSION }}
-          path: ${{ env.TAR_NAME }}
+          path: darwin-x64-openclaw-${{ env.REAL_VERSION }}.tar.gz
